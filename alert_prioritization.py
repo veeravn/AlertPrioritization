@@ -5,7 +5,6 @@ from datetime import timedelta
 from collections import defaultdict
 from multiprocessing import Pool
 import argparse
-import numpy
 
 # Load configuration from JSON file
 def load_config(config_file='config.json'):
