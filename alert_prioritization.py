@@ -2,7 +2,11 @@ import pandas as pd
 import argparse
 import json
 from datetime import datetime, timedelta
-print(pd)
+from concurrent.futures import ProcessPoolExecutor
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Helper Functions
 def parse_timestamp(timestamp):
@@ -10,7 +14,7 @@ def parse_timestamp(timestamp):
         return datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
     except ValueError:
         raise ValueError(f"Invalid timestamp format: {timestamp}")
-# Function to determine alert priority
+
 def determine_priority(risk_score):
     if risk_score > 15:
         return 'High'
@@ -19,86 +23,93 @@ def determine_priority(risk_score):
     else:
         return 'Low'
 
-def compute_frequency_score(alert, data, config):
-    # Frequency Weight (alert_count within a time window)
-    try:
-        time_window_minutes = int(config["frequency_threshold"]["time_window"].rstrip("m"))
-    except (ValueError, AttributeError):
-        raise ValueError("Invalid time_window format in configuration. Expected a string ending with 'm', e.g., '10m'.")
-    
+def compute_frequency_scores(data, config):
+    time_window_minutes = int(config["frequency_threshold"]["time_window"].rstrip("m"))
     time_window = timedelta(minutes=time_window_minutes)
     count_threshold = config['frequency_threshold']['count']
-    
-    alert_time = pd.to_datetime(alert['timestamp'])
-    recent_alerts = data[(data['source_ip'] == alert['source_ip']) &
-                               (data['timestamp'] > (alert_time - time_window))]
 
-    if len(recent_alerts) >= count_threshold:
-        return len(recent_alerts) * config['frequency_weight']
-    else:
-        return 0
+    # Compute frequency score for each alert
+    data = data.sort_values(by='timestamp')
+    frequency_scores = []
 
-def compute_blacklist_penalty(alert, config):
-    return 10 if alert["source_ip"] in config["ip_blacklist"] else 0
+    for i, row in data.iterrows():
+        start_time = row['timestamp'] - time_window
+        recent_alerts = data[(data['source_ip'] == row['source_ip']) & (data['timestamp'] > start_time)]
+        score = len(recent_alerts) * config['frequency_weight'] if len(recent_alerts) >= count_threshold else 0
+        frequency_scores.append(score)
 
-def compute_risk_score(alert, config, data):
+    data['frequency_score'] = frequency_scores
+    return data
 
-    total_score = 0
-    # Severity Contribution
-    total_score += alert["severity"] * config["severity_weight"]
+def compute_risk_scores(data, config):
+    # Vectorized computation for risk scores
+    data['severity_score'] = data['severity'] * config['severity_weight']
+    data['blacklist_penalty'] = data['source_ip'].apply(lambda ip: 10 if ip in config['ip_blacklist'] else 0)
+    data['role_score'] = data['user_role'].map(config['role_weights']).fillna(0) * config['role_weight']
 
-    # Frequency Contribution
-    total_score += compute_frequency_score(alert, data, config) * config["frequency_weight"]
+    # Total risk score
+    data['risk_score'] = (
+        data['severity_score'] +
+        data['frequency_score'] +
+        data['role_score'] +
+        data['blacklist_penalty']
+    ).round(2)
+    return data
 
-    # Role Contribution
-    total_score += config["role_weights"].get(alert["user_role"], 0) * config["role_weight"]
+def process_chunk(chunk, config):
+    try:
+        chunk['timestamp'] = pd.to_datetime(chunk['timestamp'])
 
-    # Blacklist Penalty
-    total_score += compute_blacklist_penalty(alert, config)
-    return round(total_score, 2)
+        # Compute frequency scores
+        chunk = compute_frequency_scores(chunk, config)
 
-# Compute risk scores
-try:
-    # Parse data file and config file from command line arguments
-    parser = argparse.ArgumentParser(prog='Alert Prioritization', usage='%(prog)s [options]')
-    parser.add_argument("dataFile", help="The CSV file with alerts to parse.")
-    parser.add_argument("configFile", help="The risk scoring json config file.")
-    args = parser.parse_args()
-    parser.print_help()
+        # Compute risk scores
+        chunk = compute_risk_scores(chunk, config)
 
-    # read alerts csv data file
-    alerts = pd.read_csv(args.dataFile)
+        # Determine priority
+        chunk['priority'] = chunk['risk_score'].apply(determine_priority)
+        return chunk[['alert_id', 'risk_score', 'priority']]
+    except Exception as e:
+        logging.error(f"Error processing chunk: {e}")
+        return pd.DataFrame()
 
-    # read the config json file
-    with open(args.configFile) as f:
-        config = json.load(f)
-    
-    # Convert the timestamp to datetime
-    alerts['timestamp'] = pd.to_datetime(alerts['timestamp'])
-    # List to store results
-    results = []
+if __name__ == "__main__":
+    try:
+        # Parse arguments
+        parser = argparse.ArgumentParser(prog='Scalable Alert Prioritization')
+        parser.add_argument("dataFile", help="The CSV file with alerts to parse.")
+        parser.add_argument("configFile", help="The risk scoring JSON config file.")
+        args = parser.parse_args()
 
-    # Process each alert
-    for index, alert in alerts.iterrows():
-        risk_score = compute_risk_score(alert, config, alerts)
-        priority = determine_priority(risk_score)
-        results.append({
-            'alert_id': alert['alert_id'],
-            'risk_score': risk_score,
-            'priority': priority
-        })
-    # Create DataFrame for output
-    output_df = pd.DataFrame(results)
+        # Read configuration
+        with open(args.configFile) as f:
+            config = json.load(f)
 
-    # Save the output to a new CSV
-    output_df.to_csv('alerts_with_priority.csv', index=False)
-    
-    # Bonus: Summary of priorities
-    priority_summary = output_df['priority'].value_counts()
-    print("Priority Summary:")
-    print(priority_summary)
+        chunk_size = 10000  # Adjust based on memory and dataset size
+        results = []
 
-except Exception as e:
-    print(f"An error occurred: {e}")       
-        
+        # Process data in chunks using parallel processing
+        with ProcessPoolExecutor() as executor:
+            futures = []
 
+            for chunk in pd.read_csv(args.dataFile, chunksize=chunk_size):
+                futures.append(executor.submit(process_chunk, chunk, config))
+
+            for future in futures:
+                result = future.result()
+                if not result.empty:
+                    results.append(result)
+
+        # Combine all results
+        final_df = pd.concat(results, ignore_index=True)
+
+        # Save to CSV
+        final_df.to_csv('alerts_with_priority.csv', index=False)
+
+        # Log summary
+        priority_summary = final_df['priority'].value_counts()
+        logging.info("Priority Summary:")
+        logging.info(priority_summary)
+
+    except Exception as e:
+        logging.error(f"An error occurred: {e}")
