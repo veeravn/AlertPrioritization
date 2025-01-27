@@ -1,0 +1,23 @@
+{
+    "alert_type_weights": {
+        "Brute Force": 3,
+        "DDoS": 4,
+        "Malware": 2
+    },
+    "frequency_threshold": {
+        "count": 5,
+        "time_window": "10m"
+    },
+    "role_weights": {
+        "Admin": 5,
+        "Database": 4,
+        "Web Server": 2
+    },
+    "ip_blacklist": [
+        "192.168.1.100",
+        "10.0.0.15"
+    ],
+    "severity_weight": 0.4,
+    "frequency_weight": 0.3,
+    "role_weight": 0.3
+}
