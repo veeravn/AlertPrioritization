@@ -62,7 +62,7 @@ try:
     # Parse data file and config file from command line arguments
     parser = argparse.ArgumentParser(prog='Alert Prioritization', usage='%(prog)s [options]')
     parser.add_argument("dataFile", help="The CSV file with alerts to parse.")
-    parser.add_argument("configFile", type=int, help="The risk scoring json config file.")
+    parser.add_argument("configFile", help="The risk scoring json config file.")
     args = parser.parse_args()
     parser.print_help()
 
