@@ -108,7 +108,7 @@ dtype: int64
 Run unit tests to validate the functionality:
 
 ```bash 
-python -m unittest test_alert_prioritization.py
+python -m unittest alert_prioritization_test.py
 ```
 1. **Parsing Timestamps**:
    - Valid timestamp parsing.
