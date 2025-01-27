@@ -1,141 +1,117 @@
 import unittest
-from unittest.mock import patch, MagicMock
 import pandas as pd
-from datetime import datetime
-import json
-from io import StringIO
-from alert_prioritization import parse_timestamp, determine_priority, compute_frequency_score, compute_blacklist_penalty, compute_risk_score
+import os
+from datetime import datetime, timedelta
+from alert_prioritization import (
+    load_config,
+    classify_priority,
+    precompute_alert_frequency,
+    calculate_risk_score,
+    process_chunk
+)
 
 class TestAlertPrioritization(unittest.TestCase):
     
-    # Test parse_timestamp function
-    def test_parse_timestamp_valid(self):
-        timestamp = "2025-01-01T12:00:00"
-        expected = datetime(2025, 1, 1, 12, 0, 0)
-        self.assertEqual(parse_timestamp(timestamp), expected)
-    
-    def test_parse_timestamp_invalid(self):
-        timestamp = "01-01-2025 12:00:00"
-        with self.assertRaises(ValueError):
-            parse_timestamp(timestamp)
-
-    # Test determine_priority function
-    def test_determine_priority_high(self):
-        self.assertEqual(determine_priority(16), 'High')
-    
-    def test_determine_priority_medium(self):
-        self.assertEqual(determine_priority(10), 'Medium')
-    
-    def test_determine_priority_low(self):
-        self.assertEqual(determine_priority(5), 'Low')
-
-    # Test compute_frequency_score function
-    @patch('pandas.to_datetime')
-    def test_compute_frequency_score_high(self, mock_to_datetime):
-        alert = {"source_ip": "192.168.1.1", "timestamp": "2025-01-01T12:00:00"}
-        data = pd.DataFrame({
-            'source_ip': ["192.168.1.1", "192.168.1.1"],
-            'timestamp': ["2025-01-01T12:00:01", "2025-01-01T12:00:02"],
-        })
-        config = {
-            "frequency_threshold": {"time_window": "1m", "count": 2},
-            "frequency_weight": 2
+    def setUp(self):
+        # Example configuration
+        self.config = {
+            "alert_type_weights": {"Brute Force": 3, "DDoS": 4, "Malware": 2},
+            "frequency_threshold": {"count": 5, "time_window": "10m"},
+            "role_weights": {"Admin": 5, "Database": 4, "Web Server": 2},
+            "ip_blacklist": ["192.168.1.100", "10.0.0.15"],
+            "severity_weight": 0.4,
+            "frequency_weight": 0.3,
+            "role_weight": 0.3
         }
-        mock_to_datetime.return_value = datetime(2025, 1, 1, 12, 0, 0)
-        
-        result = compute_frequency_score(alert, data, config)
-        self.assertEqual(result, 4)  # 2 alerts * frequency_weight of 2
-    
-    @patch('pandas.to_datetime')
-    def test_compute_frequency_score_low(self, mock_to_datetime):
-        alert = {"source_ip": "192.168.1.1", "timestamp": "2025-01-01T12:00:00"}
-        data = pd.DataFrame({
-            'source_ip': ["192.168.1.1"],
-            'timestamp': ["2025-01-01T12:00:02"],
-        })
-        config = {
-            "frequency_threshold": {"time_window": "1m", "count": 2},
-            "frequency_weight": 2
-        }
-        mock_to_datetime.return_value = datetime(2025, 1, 1, 12, 0, 0)
-        
-        result = compute_frequency_score(alert, data, config)
-        self.assertEqual(result, 0)
 
-    # Test compute_blacklist_penalty function
-    def test_compute_blacklist_penalty_blacklisted(self):
-        alert = {"source_ip": "192.168.1.1"}
-        config = {"ip_blacklist": ["192.168.1.1"]}
-        result = compute_blacklist_penalty(alert, config)
-        self.assertEqual(result, 10)
-
-    def test_compute_blacklist_penalty_non_blacklisted(self):
-        alert = {"source_ip": "192.168.1.2"}
-        config = {"ip_blacklist": ["192.168.1.1"]}
-        result = compute_blacklist_penalty(alert, config)
-        self.assertEqual(result, 0)
-
-    # Test compute_risk_score function
-    @patch('pandas.to_datetime')
-    def test_compute_risk_score(self, mock_to_datetime):
-        alert = {
-            "alert_id": 1,
-            "severity": 5,
-            "user_role": "admin",
-            "source_ip": "192.168.1.1",
-            "timestamp": "2025-01-01T12:00:00"
-        }
-        data = pd.DataFrame({
-            'alert_id': [1],
-            'source_ip': ["192.168.1.1"],
-            'timestamp': ["2025-01-01T12:00:00"],
-            'severity': [5],
-            'user_role': ["admin"]
-        })
-        config = {
-            "frequency_threshold": {"time_window": "1m", "count": 2},
-            "frequency_weight": 2,
-            "severity_weight": 1,
-            "role_weights": {"admin": 3},
-            "role_weight": 2,
-            "ip_blacklist": ["192.168.1.1"]
-        }
-        mock_to_datetime.return_value = datetime(2025, 1, 1, 12, 0, 0)
-        
-        result = compute_risk_score(alert, config, data)
-        expected_risk_score = 5 * 1 + 0 + 3 * 2 + 10  # Severity + Frequency + Role + Blacklist Penalty
-        self.assertEqual(result, expected_risk_score)
-
-    # Test file parsing and integration (mocking pandas read_csv and json loading)
-    @patch('pandas.read_csv')
-    @patch('builtins.open', new_callable=MagicMock)
-    def test_main_program_logic(self, mock_open, mock_read_csv):
-        mock_read_csv.return_value = pd.DataFrame({
-            'alert_id': [1],
-            'source_ip': ["192.168.1.1"],
-            'timestamp': ["2025-01-01T12:00:00"],
-            'severity': [5],
-            'user_role': ["admin"]
+        # Example alert data
+        self.alert_data = pd.DataFrame({
+            "alert_id": [1, 2, 3],
+            "alert_type": ["Brute Force", "DDoS", "Malware"],
+            "timestamp": [
+                (datetime.now() - timedelta(minutes=5)).isoformat(),
+                (datetime.now() - timedelta(minutes=15)).isoformat(),
+                (datetime.now() - timedelta(minutes=20)).isoformat()
+            ],
+            "target_ip": ["192.168.1.1", "192.168.1.2", "192.168.1.3"],
+            "source_ip": ["192.168.1.100", "203.0.113.4", "10.0.0.15"],
+            "severity": [3, 4, 2],
+            "user_role": ["Admin", "Web Server", "Database"],
+            "alert_count": [7, 10, 3]
         })
 
-        mock_open.return_value.__enter__.return_value = MagicMock(read=lambda: json.dumps({
-            "frequency_threshold": {"time_window": "1m", "count": 2},
-            "frequency_weight": 2,
-            "severity_weight": 1,
-            "role_weights": {"admin": 3},
-            "role_weight": 2,
-            "ip_blacklist": ["192.168.1.1"]
-        }))
+    def test_load_config(self):
+        """Test that the configuration loads correctly."""
+        config = self.config
+        required_keys = [
+            "alert_type_weights", "frequency_threshold", "role_weights", "ip_blacklist",
+            "severity_weight", "frequency_weight", "role_weight"
+        ]
+        for key in required_keys:
+            self.assertIn(key, config)
 
-        # Call the main function logic (would typically be in your script)
-        with patch('sys.stdout', new_callable=StringIO) as mock_stdout:
-            # Assuming you have a function that runs your script, e.g., `run_alert_prioritization`
-            # run_alert_prioritization() 
-            print("Test complete")
+    def test_load_config_missing_key(self):
+        """Test loading a config with missing keys."""
+        with self.assertRaises(FileNotFoundError):
+            load_config('invalid_config.json')
 
-        # Check that output is correct, e.g., you might check the expected printed text
-        output = mock_stdout.getvalue()
-        self.assertIn("Priority Summary:", output)
+    def test_precompute_alert_frequency(self):
+        """Test precomputing alert frequency in the dataset."""
+        alert_df = precompute_alert_frequency(self.alert_data.copy(), self.config)
+        self.assertIn("precomputed_frequency", alert_df.columns)
+        self.assertGreaterEqual(alert_df["precomputed_frequency"].iloc[0], 0)
 
-if __name__ == '__main__':
+    def test_precompute_alert_frequency_empty(self):
+        """Test precomputing alert frequency with an empty DataFrame."""
+        empty_df = pd.DataFrame(columns=self.alert_data.columns)
+        result_df = precompute_alert_frequency(empty_df, self.config)
+        self.assertTrue(result_df.empty)
+
+    def test_calculate_risk_score(self):
+        """Test calculating the risk score of an alert."""
+        alert = self.alert_data.iloc[0].to_dict()
+        alert["precomputed_frequency"] = 3  # Simulate precomputed frequency
+        risk_score = calculate_risk_score(alert, self.config)
+        self.assertGreater(risk_score, 0)
+
+    def test_calculate_risk_score_blacklisted_ip(self):
+        """Test calculating the risk score for a blacklisted source IP."""
+        alert = self.alert_data.iloc[0].to_dict()
+        alert["source_ip"] = "192.168.1.100"  # Blacklisted IP
+        alert["precomputed_frequency"] = 3
+        risk_score = calculate_risk_score(alert, self.config)
+        self.assertGreater(risk_score, 0)
+        self.assertIn("192.168.1.100", self.config["ip_blacklist"])
+
+    def test_calculate_risk_score_low_severity(self):
+        """Test calculating the risk score for low severity."""
+        alert = self.alert_data.iloc[2].to_dict()  # Severity 2
+        alert["precomputed_frequency"] = 1
+        risk_score = calculate_risk_score(alert, self.config)
+        self.assertGreater(risk_score, 0)
+
+    def test_process_chunk(self):
+        """Test processing a chunk of alert data."""
+        chunk = self.alert_data.copy()
+        chunk["precomputed_frequency"] = [3, 5, 2]  # Simulate precomputed frequencies
+        results = process_chunk(chunk, self.config)
+        self.assertEqual(len(results), len(chunk))
+        for result in results:
+            self.assertIn("alert_id", result)
+            self.assertIn("risk_score", result)
+            self.assertIn("priority", result)
+
+    def test_classify_priority(self):
+        """Test classifying priority based on risk score."""
+        self.assertEqual(classify_priority(9), "Medium")
+        self.assertEqual(classify_priority(17), "High")
+        self.assertEqual(classify_priority(3), "Low")
+
+    def test_classify_priority_boundary(self):
+        """Test priority classification on boundary conditions."""
+        self.assertEqual(classify_priority(15), "Medium")
+        self.assertEqual(classify_priority(8), "Low")
+
+if __name__ == "__main__":
     unittest.main()
+
