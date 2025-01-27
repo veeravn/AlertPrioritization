@@ -17,7 +17,7 @@ This Python script is designed to process security alerts, compute risk scores b
 
 - Python 3.x
 - `pandas` library version 2.2.0
-- `argparse` library
+- `argparse` (built-in Python module)
 - `json` (built-in Python module)
 - `unittest` for testing (built-in Python module)
 
@@ -72,7 +72,7 @@ The JSON file defines the parameters for scoring the alerts:
 - **`severity_weight`**: The weight applied to the severity of the alert.
 - **`role_weights`**: A dictionary that defines the weight for each user role (e.g., `admin`, `guest`).
 - **`role_weight`**: The weight applied to the role's contribution to the risk score.
-- **`ip_blacklist`**: A list of blacklisted IP addresses to penalize in the risk score.
+- **`ip_blacklist`**: A list of blacklisted IP addresses to penalize in the risk score.  Assuming that the IP addresses in this list only affect the individual address and not a full CIDR block. (e.g., `192.168.1.0` means that only that IP is black listed and IP `192.168.1.1 ` would be fine)
 
 ## Running the Script
 
